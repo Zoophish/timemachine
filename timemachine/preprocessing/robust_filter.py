@@ -5,8 +5,7 @@ class FinancialUKF:
     def __init__(self, n_dims, alpha=0.001, beta=2.0, kappa=0.0):
         """
         This is a vectorised unscented Kalman filter.
-        The default process function is a combination of mean reversion, momentum with decay and stochastic volatility, which
-        is robust on a lot of financial features.
+        The default process function is a combination of mean reversion, momentum with decay and stochastic volatility.
         
         Args:
             n_dims: Number of dimensions for each state variable

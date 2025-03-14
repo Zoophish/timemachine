@@ -1,5 +1,5 @@
-# ====== Long-Short-Term Training via Stohastic Segments ======
-# Organising the time series data in a way to foster the discovery of better short term and long term dynamics, while
+# ====== Stohastic Segments Training ======
+# Organising the time series data in a way to encourage the discovery of better short term and long term dynamics, while
 # also encouraging the model to use its cell and hidden states robustly.
 
 #   When training LSTMs, a standard approach is to format the data into pairs of lookback windows and lookahead windows. Lookahead
@@ -14,22 +14,22 @@
 #           - Starting from different initial points (learning how to manage initial cell/hidden states)
 #           - Avoid memorising the original sequence (overfitting)
 #
-#   Let's focus on a core feature of RNNs, including LSTMS: Although the model may be trained on a fixed window length, the model
+#   Although the model may be trained on a fixed window length, the model
 # can 'unroll' as many times as we desire. If the model models general the temporal dynamics well, it should know how to do smaller
-# unrollings as well as larger unrollings. Perhaps by being good at both, it could make the model more useful.
+# unrollings as well as larger unrollings
 # 
-#   I believe fixed lookback windows essentially encourage the model to become a glorified lookup table, rather than fostering a temporal understanding of the data.
-# Not only this, but window predictions should be statefully connected - that is the cell/hidden states should be passed on. Otherwise, the model only learns how to use
-# memory for a fixed input length, which might not generalise well for long term changes, and you might as well use an MLP or regression tree model that treats all inputs independantly!
-# However, to do this, the model has to be trained on using the passed-on states effectively. Moreover, to encourage the model not to use its previous state as a lookup table,
+#   Fixed lookback windows could essentially encourage the model to become a lookup table, rather than fostering a temporal understanding of the data.
+# Window predictions should be statefully connected - that is the cell/hidden states should be passed on. Otherwise, the model only learns how to use
+# memory for a fixed input length, which might not generalise well for long term changes, and you might as well use an MLP or regression tree model that treats all inputs as lags.
+# To do this, the model has to be trained using the passed-on states. Moreover, to encourage the model not to use its previous state as a lookup table,
 # the model needs to learn how to start with initial states on different inputs.
 #
 #  Assumptions:
-#   - The model architecture can stably learn on long sequences (i.e. no inherant artifacts as a result of using long inputs, e.g. vanishing gradients)
-#   - The model architecture is, at least in theory, able to universally represent non-linear patterns over any temporal duration, not just short windows (in practice, we just mean long sequences)
-#   - Learning small sequences before large ones, or vice versa, is not better for learning, i.e. we assume as little as posible over which parts of the data are easier to learn, hence why segments are stochastically chosen
-#   - Our definition of noise is slightly deeper than simple random-looking bands in the data. It is, importantly, defined as the information theory limit whereby some temporal fluctuations are
-#     100% decoupled from any future value, i.e. a 'perfect temporal non-linear blackbox learner' could not use that information to enhance its prediction.
+#   - The model architecture can stably learn on long sequences (i.e. no inherant artifacts as a result of using long inputs, e.g. exploding gradients)
+#   - The model architecture is, at least in theory, able to universally represent non-linear patterns over any temporal duration, not just short windows
+#   - Learning smaller sequences before large ones, or vice versa, is not better for learning, i.e. assume as little as possible over which parts of the data are easier to learn
+#   - Noise is the information theory limit whereby temporal fluctuations are completely decoupled from any future value, i.e. a 'perfect temporal non-linear blackbox learner'
+#     could not use that information to enhance its prediction.
 #
 # ---- How it works ----
 #
@@ -40,26 +40,23 @@
 #   c) Pack these into batches for parallelisation and gradient smoothing.
 #
 # The method is meant to be stochastic. Each epoch, the majority of the full dataset should be 'covered' with a range of lookback windows and segments.
-#   - We define lookback windows as the number of unrolls per single prediction
-#   - A segment is defined as a continuous sequence of lookback windows (and predictions) in which are statefully connected during training
+#   - Lookback windows are the number of unrolls per single prediction
+#   - A segment is a continuous sequence of lookback windows (and predictions) which are statefully connected during training
 #  
 # The key idea is to train the model on varying window lengths and segment lengths and offsets in the original time series.
-# We choose to do this stochastically for practical purposes and to help mitigate overfitting. It should encourange the model to learn
+# This is done stochastically for practical purposes and to reduce overfitting. It should encourange the model to learn
 # temporal patterns on all time intervals.
 #
 # The main technical complications are in creating batches:
 #   - Segments must be processed serially between batches, so different segements can be processed in parallel.
-#   - An end-of-segment (EOS) mask tells us which segments have terminated in a batch (so we can reset the states).
-#   - Segments are sorted by lookback length to reduce padding variation, which improves performance (and because pytorch requires it)
-#   - The final few batches will be smaller as the final few segments are processed (and we cannot have zero length entries in pytorch)
+#   - An end-of-segment (EOS) mask represents the segments that have terminated in a batch (so the states will be reset in that batch dimension).
+#   - Segments are sorted by lookback length to reduce padding variation, which improves performance (and because PyTorch requires it)
+#   - The final few batches will be smaller as the final few segments are processed (and PyTorch won't support zero length entries)
 #
 #
-# Notes:
-# - Treat models like students - you want to be a good teacher. Simply providing the answer will not guareuntee the model will understand how to get to the answer.
+# Notes/Todo:
 #   - Try and guide the models during training without introducing bias, for example:
 #       - adding truely random noise and including the current timestep noise estimate in the output.
-#       - giving the model different rolling averages
-#       - giving the model complicated rolling calculations? (this might bias it though)
 #
 # - Curriculum learning - define 'simpler' things to produce, and gradually introduce complexity. Difficult to assess 'simple' on things like financial data.
 #   - Being able to determine the simple->hard spectrum is effectively what enables learning as there needs to be a smooth path.

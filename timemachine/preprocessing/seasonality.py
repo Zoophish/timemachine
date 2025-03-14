@@ -10,7 +10,8 @@ def cyclical_calendar_encoding(
     step : str = '1ms'
 ) -> pl.DataFrame:
     """
-    Creates a cyclical encoding over a given calendar period (year, month, week, day) in a given step size (1m, 1h, 1d, 1w, 1mo, 1y, etc).
+    Adds the cyclical encoding to df over a given calendar period (year, month, week, day) in a given step size (1m, 1h, 1d, 1w, 1mo, 1y, etc).
+    Column names will be {period}_sin, {period}_cos.
     
     Args:
         df (pl.DataFrame): Input DataFrame containing the datetime column.
@@ -42,10 +43,10 @@ def cyclical_calendar_encoding(
     )
     max_period *= 1e3  # convert to ms
 
-    df = df.with_columns([
+    df = df.with_columns(
         (2 * np.pi * (pl.col('timestamp') / max_period)).cos().alias(f"{period}_cos"),
         (2 * np.pi * (pl.col('timestamp') / max_period)).sin().alias(f"{period}_sin")
-    ])
+    )
 
     return df
 

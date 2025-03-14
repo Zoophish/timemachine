@@ -50,7 +50,7 @@ class PenalisedSignLoss(nn.Module):
     def __init__(self, scaler, penalty_factor=10.0):
         """
         Custom loss that penalises wrong-sign predictions heavily.
-        It assumes the sign is relative to the unscaled data; as such, the scaler must be provided.
+        It assumes the sign is not preserved from the unscaled data; as such, the scaler must be provided.
         
         Args:
             scaler (sklearn scaler): Scaler used to normalise targets, needed for inverse-scaling.
@@ -80,3 +80,39 @@ class PenalisedSignLoss(nn.Module):
         # Combine losses
         total_loss = mse + sign_loss.mean()
         return total_loss
+
+
+
+def divide_no_nan(a, b):
+    div = a / b
+    div[div != div] = 0.0
+    div[div == float('inf')] = 0.0
+    return div
+
+
+class MAPELoss(nn.Module):
+    """
+    Mean absolute percentage error.
+    """
+    def __init__(self, epsilon=1e-8):
+        super().__init__()
+        self.epsilon = epsilon
+        
+    def forward(self, predictions, targets):
+        percentage_errors = torch.abs((predictions - targets) * divide_no_nan(torch.ones_like(targets),  torch.abs(targets)))
+        
+        mape = 100.0 * torch.mean(percentage_errors)
+        
+        return mape
+    
+class MAELoss(nn.Module):
+    """
+    Mean absolute error loss.
+    """
+    def __init__(self, epsilon=1e-8):
+        super().__init__()
+        self.epsilon = epsilon
+        
+    def forward(self, predictions, targets):
+        mae = torch.mean(torch.abs(predictions - targets))
+        return mae
