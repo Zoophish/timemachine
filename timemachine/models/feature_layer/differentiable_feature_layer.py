@@ -55,6 +55,7 @@ class DifferentiableFeatureLayer(nn.Module):
         
         self.output_dim = input_dim * (1 + self.feature_output_dims)
         
+        self.feature_info = {}
         self.learnable_params = nn.ParameterDict()
         
         self.fixed_params = {}
@@ -65,10 +66,13 @@ class DifferentiableFeatureLayer(nn.Module):
             # register learnable parameters
             for param_name, param_config in config.get('learnable_params', {}).items():
                 param_key = f"{feature_name}_{param_name}"
+                self.feature_info[param_key] = {}
                 
                 # check if param_config is a range or a single value
                 if isinstance(param_config, (list, tuple)) and len(param_config) == 2:
                     min_val, max_val = param_config
+                    self.feature_info[param_key]['min'] = min_val
+                    self.feature_info[param_key]['max'] = max_val
 
                     init_value = min_val + (max_val - min_val) * torch.rand((self.input_dim, ))
                     
@@ -95,15 +99,16 @@ class DifferentiableFeatureLayer(nn.Module):
         if param_key in self.learnable_params:
             # Apply constraints to learnable parameters
             raw_param = self.learnable_params[param_key]
+
+            min_val = self.feature_info[param_key]['min']
+            max_val = self.feature_info[param_key]['max']
+
+            # scale to get a value between 1 and max_window
+            return min_val + torch.sigmoid(raw_param) * (max_val - min_val)
             
-            # constrain window sizes to be positive and integer-like
-            if param_name == 'window_size':
-                # scale to get a value between 1 and max_window
-                return 1.0 + torch.sigmoid(raw_param) * self.max_window
-            
-            # constrain alpha parameters to be between 0 and 1
-            if param_name in ['alpha', 'decay', 'threshold', 'window_size']:
-                return torch.sigmoid(raw_param)
+            # # constrain alpha parameters to be between 0 and 1
+            # if param_name in ['alpha', 'decay', 'threshold', 'window_size']:
+            #     return torch.sigmoid(raw_param)
             
             # default: return the raw parameter
             return raw_param
@@ -191,21 +196,22 @@ class DifferentiableFeatureLayer(nn.Module):
         result = torch.zeros((batch_size, seq_len, feature_output_size), device=device, dtype=torch.float32)
         # result = torch.zeros_like(x)
         
-        # window size is a special case because it needs optimising to access data from the full series
+        # window size is a special case because it needs access to the full series
         # NOTE there may be a more elegant way to do this...
         if 'window_size' in params:
             # get the lookback windows for each item in the batch
-            batch_windows = torch.zeros((batch_size, self.max_window + seq_len, input_dim), device=device)  # zero padding for now
+            batch_windows = torch.zeros((batch_size, self.max_window + seq_len, input_dim), device=device)  # zeros padding for now
             for b in range(batch_size):
+                lookback = self.max_window
                 # start/end index for this batch item's data in full_series
                 seq_start_idx = global_start_indices[b].item()
                 seq_end_idx = global_end_indices[b].item()
                 
                 # get the global start index of the lookback window for this batch
-                window_start_idx = max(0, seq_start_idx - self.max_window)
+                window_start_idx = max(0, seq_start_idx - lookback)
 
-                # account for padding (lookback window goes past the start of full_series)
-                pad_size = abs(min(seq_start_idx - self.max_window, 0))
+                # account for padding (lookback window goes past the start of full_series, where there's no data - leave as 'zeros')
+                pad_size = abs(min(seq_start_idx - lookback, 0))
                 # we could have pad the data retrieved from full_series below, but this should me marginally faster
 
                 # the sequence goes back enough for the window start for the first element and the end of the input sequence
@@ -215,14 +221,21 @@ class DifferentiableFeatureLayer(nn.Module):
             # Notice that we slide the start of the window here with t, but because each batch item may have a different window size,
             # the end of the window needs to be handled in the feature function
             for t in range(seq_len):  # apply the feature func for each position in the input sequence
-                result[:, t, :] = feature_func(batch_windows[:, t:, :], **params)
+                result[:, t, :] = feature_func(batch_windows[:, t:, :], max_window=lookback, **params)
         else:
+            batch_windows = torch.zeros((batch_size, 1 + seq_len, input_dim), device=device)  # zeros padding for now
+            for b in range(batch_size):
+                seq_start_idx = global_start_indices[b].item()
+                seq_end_idx = global_end_indices[b].item()
+                lookback = 1
+                window_start_idx = max(0, seq_start_idx - lookback)
+                pad_size = abs(min(seq_start_idx - lookback, 0))
+                batch_windows[b, pad_size:, :] = full_series[window_start_idx:seq_end_idx]
+
             # feature doesn't use a window - use the input tensor x
-            # (confusion note) instead of sliding the back of the window, we slide the front,
-            # purely for implementation reasons
-            for t in range(seq_len):
-                # NOTE: technically we should pass a lookback window of size 1 here...
-                result[:, t, :] = feature_func(x[:, 0:t, :], **params)
+            # (confusion note) instead of sliding the back of the window, we slide the front
+            for t in range(1, seq_len+1): # this is very slow, should consider changing it
+                result[:, t, :] = feature_func(batch_windows[:, 0:t, :], **params)
         
         return result
     

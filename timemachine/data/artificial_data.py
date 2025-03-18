@@ -116,3 +116,8 @@ def nonlinear_autoregressive(n, lookback=3, complexity=2, initial_values=None, n
         result[i] = scaling * np.tanh(next_value) + np.random.normal(0, noise_level)
     
     return result
+
+def brownian_series(n, std=1):
+    out = np.zeros((n,), dtype=np.float32)
+    r = np.random.normal(out, std)
+    return np.cumsum(r)
