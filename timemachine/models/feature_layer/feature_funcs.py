@@ -1,10 +1,27 @@
 import torch
 import torch.nn as nn
-from typing import List, Dict, Callable, Tuple, Optional, Union
 
 
+# @torch.compile
+def _gauss_kernel(x, g, k = 3.0):
+    """
+    Noncyclic windowing kernel. Assumes distance x is normalised to (0, 1).
+    g is sharpness, k is like a shift factor for low values of g.
+    Becomes a hard window at g->inf.
+    Negative x can lead to NaNs.
 
-def differentiable_rolling_mean(x: torch.Tensor, max_window : int, window_size: torch.Tensor, **kwargs) -> torch.Tensor:
+    y = k^{ -kx^{g} }
+    """
+    return torch.pow(k, -torch.pow(k * x, g))
+
+
+def rolling_avg(
+        x: torch.Tensor,
+        max_window : int,
+        window_size: torch.Tensor,
+        gamma : torch.Tensor | float = 3.0,
+        **kwargs
+    ) -> torch.Tensor:
     """
     The simplest example of a rolling feature that uses a continuous window size (and is therefore differentiable
     with respect to the loss function).
@@ -18,7 +35,8 @@ def differentiable_rolling_mean(x: torch.Tensor, max_window : int, window_size: 
     the rolling average value for the provided x and window size (for each batch item).
     
     The sequence loop will ensure that the first element of x will be the first element in the sliding window,
-    and we know that the end of the window must be window_size ahead.
+    and we know that the end of the window must be window_size ahead. More sequence is provided than this function
+    is strictly meant to see because batched tensors must be rectangular and ragged.
     
     We use a kernel (window function) weighting instead of a hard window to make the window_size continuous and thus
     differentiable with respect to the loss function. To picture it, only one 'side' of the window function is used,
@@ -47,17 +65,18 @@ def differentiable_rolling_mean(x: torch.Tensor, max_window : int, window_size: 
 
     # we want to discard elements past the centre (we'd ideally not pass these in the first place, but the x tensor
     # must be squared off because it contains all the batch items)
-    mask = positions <= center
+    mask = positions <= center    
 
     # get the distance from the centre
-    normalised_dist = (center - positions) / window_size
+    normalised_dist = torch.abs((center - positions) / window_size)
 
     # parameters vary on the channel dimension
     window_size = window_size.view(1, 1, -1)
     
-    # gaussian-style windowing function (very small at normalised_dist = 1 - higher powers create sharper falloff)
-    # NOTE could potentially make the power a parameter...
-    weights = torch.exp(-torch.pow(2.0 * normalised_dist, 2.0)) * mask
+    gamma = gamma.view(1, 1, -1)
+
+    # gaussian-style windowing function (very small at normalised_dist = 1)
+    weights = _gauss_kernel(normalised_dist, gamma) * mask
     # normalise weights
     weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
     # compute weighted sum (the average)
@@ -67,7 +86,13 @@ def differentiable_rolling_mean(x: torch.Tensor, max_window : int, window_size: 
     return weighted_sum
 
 
-def differentiable_rolling_std(x: torch.Tensor, max_window : int, window_size: torch.Tensor, **kwargs) -> torch.Tensor:
+def rolling_std(
+        x: torch.Tensor,
+        max_window : int,
+        window_size: torch.Tensor,
+        gamma : torch.Tensor | float = 3,
+        **kwargs,
+    ) -> torch.Tensor:
     """
     Rolling weighted variance.
     
@@ -81,7 +106,7 @@ def differentiable_rolling_std(x: torch.Tensor, max_window : int, window_size: t
     batch_size, seq_len, input_dim = x.shape
     
     # the mean of this 'window'/kernel
-    mean = differentiable_rolling_mean(x, max_window, window_size)
+    mean = rolling_avg(x, max_window, window_size, gamma)
     
     # if sequence length is 1, return zeros
     if seq_len == 1:
@@ -100,9 +125,12 @@ def differentiable_rolling_std(x: torch.Tensor, max_window : int, window_size: t
     # make sure not to include elements beyond the end of the window
     mask = positions <= center
     
-    normalised_dist = (center - positions) / window_size
+    # take the abs to avoid negative distances (window function undefined)
+    normalised_dist = torch.abs((center - positions) / window_size)
+
+    gamma = gamma.view(1, 1, -1)
     
-    weights = torch.exp(-torch.pow(2.0 * normalised_dist, 2.0)) * mask
+    weights = _gauss_kernel(normalised_dist, gamma) * mask
     weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
     
     # compute weighted squared deviation
@@ -115,12 +143,129 @@ def differentiable_rolling_std(x: torch.Tensor, max_window : int, window_size: t
     return weighted_variance
 
 
-def differentiable_ewma(x: torch.Tensor, alpha: torch.Tensor, **kwargs) -> torch.Tensor:
+def rolling_skewness(
+        x: torch.Tensor,
+        max_window : int,
+        window_size: torch.Tensor,
+        gamma : torch.Tensor | float = 3,
+        **kwargs
+    ) -> torch.Tensor:
+    """
+    Rolling weighted skewness.
+    
+    Args:
+        x: Input tensor of shape (batch_size, seq_len, input_dim)
+        window_size: Learnable window size parameter
+    
+    Returns:
+        Tensor of shape (batch_size, input_dim) with rolling std values
+    """
+    batch_size, seq_len, input_dim = x.shape
+    
+    # the mean of this 'window'/kernel
+    mean = rolling_avg(x, max_window, window_size, gamma)
+    
+    # if sequence length is 1, return zeros
+    if seq_len == 1:
+        return torch.zeros_like(mean)
+    
+    # same process as rolling_mean
+    positions = torch.arange(seq_len, device=x.device, dtype=torch.float32)
+    positions = positions.view(1, -1, 1).expand(batch_size, -1, input_dim)
+    
+    # Center at the last position
+    center = max_window - 1.0
+
+    # parameters vary on the channel dimension
+    window_size = window_size.view(1, 1, -1)
+
+    # make sure not to include elements beyond the end of the window
+    mask = positions <= center
+    
+    normalised_dist = torch.abs((center - positions) / window_size)
+
+    gamma = gamma.view(1, 1, -1)
+    
+    weights = _gauss_kernel(normalised_dist, gamma) * mask
+    weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
+    
+    # compute weighted squared deviation
+    deviation = x - mean.unsqueeze(1)
+    
+    # weighted sum of (deviation^3)
+    numerator = (weights * torch.pow(deviation, 3)).sum(dim=1)
+    # squared weighted sum of std
+    denominator = (torch.pow(deviation, 2) * weights).sum(dim=1) ** (3/2)
+    
+    skewness = numerator / denominator
+    return skewness
+
+
+def rolling_kurtosis(
+        x: torch.Tensor,
+        max_window : int,
+        window_size: torch.Tensor,
+        gamma : torch.Tensor | float = 3,
+        **kwargs
+    ) -> torch.Tensor:
+    """
+    Rolling weighted kurtosis (tailedness).
+    
+    Args:
+        x: Input tensor of shape (batch_size, seq_len, input_dim)
+        window_size: Learnable window size parameter
+    
+    Returns:
+        Tensor of shape (batch_size, input_dim) with rolling std values
+    """
+    batch_size, seq_len, input_dim = x.shape
+    
+    # the mean of this 'window'/kernel
+    mean = rolling_avg(x, max_window, window_size, gamma)
+    
+    # if sequence length is 1, return zeros
+    if seq_len == 1:
+        return torch.zeros_like(mean)
+    
+    # same process as rolling_mean
+    positions = torch.arange(seq_len, device=x.device, dtype=torch.float32)
+    positions = positions.view(1, -1, 1).expand(batch_size, -1, input_dim)
+    
+    # Center at the last position
+    center = max_window - 1.0
+
+    # parameters vary on the channel dimension
+    window_size = window_size.view(1, 1, -1)
+
+    # make sure not to include elements beyond the end of the window
+    mask = positions <= center
+    
+    normalised_dist = torch.abs((center - positions) / window_size)
+
+    gamma = gamma.view(1, 1, -1)
+    
+    weights = _gauss_kernel(normalised_dist, gamma) * mask
+    weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
+    
+    # compute weighted squared deviation
+    deviation = x - mean.unsqueeze(1)
+    
+    # weighted sum of (deviation^4)
+    numerator = (weights * torch.pow(deviation, 4)).sum(dim=1)
+    # squared weighted sum of std
+    denominator = (torch.pow(deviation, 2) * weights).sum(dim=1) ** 2
+    
+    kurtosis = numerator / denominator
+    return kurtosis
+
+
+def differentiable_ewma(x: torch.Tensor, context : torch.tensor, alpha: torch.Tensor, **kwargs) -> torch.Tensor:
     """
     Vectorized differentiable implementation of exponential weighted moving average (EWMA/EMA).
     
     Args:
         x: Input tensor of shape (batch_size, seq_len, input_dim)
+        last: The last value of the ewma sequence.
         alpha: Learnable smoothing parameter (between 0 and 1)
     
     Returns:
@@ -135,34 +280,13 @@ def differentiable_ewma(x: torch.Tensor, alpha: torch.Tensor, **kwargs) -> torch
     # broadcast the channel dimension properly
     alpha = alpha.view(1, 1, -1)
     
-    # Initialize output tensor
-    weighted_sum = torch.zeros((batch_size, input_dim), device=x.device)
-    
-    # We'll compute weighted sum directly to avoid creating a large weights tensor
-    cumulative_weight = torch.zeros((batch_size, input_dim), device=x.device)
-    
-    # Process sequence from newest to oldest
-    for i in range(seq_len):
-        # Get reversed index (most recent first)
-        rev_i = seq_len - 1 - i
-        # Current observation
-        curr_obs = x[:, rev_i, :]
-        
-        # For first item (most recent), weight is just alpha
-        if i == 0:
-            weight = alpha.squeeze(1)  # Shape: (1, input_dim)
-        else:
-            weight = alpha * ((1 - alpha) ** i)
-        
-        # Add to weighted sum
-        weighted_sum = weighted_sum + curr_obs * weight
-        cumulative_weight = cumulative_weight + weight
-    
-    # Normalize by sum of weights
-    return weighted_sum / (cumulative_weight + 1e-8)
+    weighted_sum = (1 - alpha) * context + alpha * x[:, -1, :]
+    context.copy_(weighted_sum)
+
+    return weighted_sum
 
 
-def differentiable_ewma_slope(x: torch.Tensor, alpha: torch.Tensor, beta: torch.Tensor = None, **kwargs) -> torch.Tensor:
+def differentiable_ewma_slope(x: torch.Tensor, context : torch.tensor, alpha: torch.Tensor, beta: torch.Tensor = None, **kwargs) -> torch.Tensor:
     """
     Calculates the slope (rate of change) of the EWMA, maintaining differentiability.
     
@@ -175,178 +299,95 @@ def differentiable_ewma_slope(x: torch.Tensor, alpha: torch.Tensor, beta: torch.
         Tensor of shape (batch_size, input_dim) with EWMA slope values
     """
     batch_size, seq_len, input_dim = x.shape
+    # broadcast the channel dimension properly
+    alpha = alpha.view(1, 1, -1)
     
-    # If sequence length is 1, slope is undefined (return zeros)
-    if seq_len <= 1:
-        return torch.zeros((batch_size, input_dim), device=x.device)
+    # If sequence length is 1, just return the last observation
+    if seq_len == 1:
+        return torch.zeros_like(alpha)
     
-    # First get the EWMA values
-    ewma = differentiable_ewma(x, alpha, **kwargs)
-    
-    # Get the most recent observation
-    latest_observation = x[:, -1, :]
-    
-    # If beta is not provided, derive it from alpha
-    if beta is None:
-        # Ensure alpha has correct shape (input_dim,)
-        if alpha.dim() == 1:
-            # Add small epsilon to avoid log(0)
-            beta = -torch.log(1 - alpha + 1e-8)
-        else:
-            # If alpha has different shape, reshape appropriately
-            beta = -torch.log(1 - alpha.view(-1) + 1e-8)
-    
-    # Ensure beta has shape (input_dim,) for proper broadcasting
-    if beta.dim() > 1:
-        beta = beta.view(-1)
-    
-    # Calculate slope using the continuous formula
-    slope = beta.view(1, -1) * (latest_observation - ewma)
-    
+    ewma = (1 - alpha) * context + alpha * x[:, -1, :]
+    context = ewma
+    slope = ewma - context
+
     return slope
 
 
-def differentiable_hurst_exponent(x: torch.Tensor, max_window : int, window_size: torch.Tensor, num_lags: int = 20, min_lag: int = 2, **kwargs) -> torch.Tensor:
+def rolling_hurst(
+        x: torch.Tensor,
+        max_window : int,
+        window_size : torch.Tensor,
+        ranges: torch.Tensor | None = None,
+        gamma : torch.Tensor | float = 3.0,
+        **kwargs
+    ) -> torch.Tensor:
     """
-    Vectorized differentiable implementation of the Hurst exponent using Rescaled Range (R/S) analysis.
-    
+    Approximate the Hurst exponent using RS analysis.
+        
     Args:
         x: Input tensor of shape (batch_size, seq_len, input_dim)
-        window_size: Learnable window size parameter of shape (input_dim,)
-        num_lags: Number of lag values to use for estimation
-        min_lag: Minimum lag value
-        
+        max_window: Maximum window (range) size
+        ranges: Ranges to sample.
+    
     Returns:
-        Tensor of shape (batch_size, input_dim) with Hurst exponent values
+        Tensor of shape (batch_size, input_dim) with rolling mean values
     """
     batch_size, seq_len, input_dim = x.shape
-    device = x.device
-    
-    # If sequence length is too small, return 0.5 (random walk)
-    if seq_len <= min_lag + 1:
-        return 0.5 * torch.ones((batch_size, input_dim), device=device)
-    
-    # Apply a soft window size constraint
-    # We need to ensure our effective window doesn't exceed sequence length
-    effective_window = torch.minimum(
-        window_size,
-        torch.tensor(seq_len - 1, dtype=torch.float32, device=device)
-    )
-    
-    # Use a Gaussian-like weighting for the window
-    positions = torch.arange(seq_len, device=device, dtype=torch.float32)
+
+    if ranges is None:
+        default_ranges = torch.tensor([16, 32, 64, 128], device=x.device)
+        ranges = default_ranges.unsqueeze(1).expand(-1, input_dim)  # (4, input_dim)
+    n_ranges = len(ranges)
+
+    # same process as rolling_mean
+    positions = torch.arange(seq_len, device=x.device, dtype=torch.float32)
     positions = positions.view(1, -1, 1).expand(batch_size, -1, input_dim)
     
-    # Center at the last position
+    gamma = gamma.view(1, 1, -1)
+
+    # center at the last position
     center = max_window - 1.0
-    effective_window = effective_window.view(1, 1, -1)  # Reshape for broadcasting
-    
+
+    # make sure not to include elements beyond the end of the window
     mask = positions <= center
-    
-    normalised_dist = (center - positions) / window_size
-    
-    weights = torch.exp(-torch.pow(2.0 * normalised_dist, 2.0)) * mask
-    
-    # Normalize weights
-    weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
-    
-    # Get the weighted price series
-    xw = x * weights
-    
-    # Compute log differences (similar to returns) with proper padding
-    # We'll use the differentiable version of diff
-    log_x = torch.log(xw + 1e-8)  # Add small epsilon to avoid log(0)
-    
-    # Compute log returns using a differentiable approach
-    log_returns = log_x[:, 1:, :] - log_x[:, :-1, :]
-    
-    # Define lag values ensuring we don't exceed available data
-    max_possible_lag = min(int(effective_window.max().item()), seq_len - 2)
-    max_lag = min(max_possible_lag, min_lag + num_lags)
-    
-    if max_lag <= min_lag:
-        # Not enough data points, return 0.5 (random walk)
-        return 0.5 * torch.ones((batch_size, input_dim), device=device)
-    
-    # Create lag values
-    lags = torch.arange(min_lag, max_lag, device=device, dtype=torch.float32)
-    log_lags = torch.log(lags)
-    
-    # Initialize tau tensor
-    tau_values = torch.zeros((batch_size, len(lags), input_dim), device=device)
-    
-    # Calculate tau for each lag
-    for i, lag in enumerate(lags):
-        lag = int(lag.item())  # We need an integer index but this doesn't affect differentiability
-        if lag < seq_len - 1:
-            # Calculate lagged differences
-            lagged_diff = log_returns[:, lag:, :] - log_returns[:, :-lag, :]
-            
-            # Calculate standard deviation (sqrt of variance)
-            # We use a differentiable version that avoids the bias term
-            # Note: std = sqrt(mean(x^2) - mean(x)^2)
-            diff_mean = torch.mean(lagged_diff, dim=1)
-            diff_var = torch.mean(lagged_diff**2, dim=1) - diff_mean**2
-            diff_std = torch.sqrt(torch.clamp(diff_var, min=1e-8))  # Clamp to avoid negative values
-            
-            tau_values[:, i, :] = diff_std
-    
-    # Take log of tau values
-    log_tau = torch.log(tau_values + 1e-8)
-    
-    # Perform differentiable linear regression to estimate Hurst exponent
-    # This replaces np.polyfit with a differentiable version
-    
-    # Expand log_lags for broadcasting
-    log_lags_expanded = log_lags.view(1, -1, 1).expand(batch_size, -1, input_dim)
-    
-    # Calculate means for the linear regression formula
-    n = len(lags)
-    sum_x = torch.sum(log_lags_expanded, dim=1)
-    sum_y = torch.sum(log_tau, dim=1)
-    sum_xy = torch.sum(log_lags_expanded * log_tau, dim=1)
-    sum_xx = torch.sum(log_lags_expanded * log_lags_expanded, dim=1)
-    
-    # Calculate slope using the formula: slope = (n*sum_xy - sum_x*sum_y) / (n*sum_xx - sum_x*sum_x)
-    denominator = n * sum_xx - sum_x * sum_x
-    # Add small epsilon to avoid division by zero
-    slope = (n * sum_xy - sum_x * sum_y) / (denominator + 1e-8)
-    
-    # The Hurst exponent is the slope multiplied by 2
-    hurst_exponent = slope * 2.0
-    
-    # Clamp values to be in the reasonable range [0, 1]
-    hurst_exponent = torch.clamp(hurst_exponent, 0.0, 1.0)
-    
-    return hurst_exponent
 
+    m = torch.zeros((batch_size, n_ranges, input_dim))  # means
+    Y = torch.zeros((batch_size, n_ranges, seq_len, input_dim))  # deviations
+    y = torch.zeros((batch_size, n_ranges, seq_len, input_dim))  # cumulative sum of deviations
+    R = torch.zeros((batch_size, n_ranges, input_dim))  # widest difference of range
+    s = torch.zeros((batch_size, n_ranges, input_dim))  # standard deviations of range
+    RS = torch.zeros((batch_size, n_ranges, input_dim))  # rescaled range
 
-# Create default feature configurations
-def create_default_feature_configs():
-    """Create a set of default feature configurations."""
-    return [
-        {
-            'name': 'rolling_mean',
-            'function': differentiable_rolling_mean,
-            'learnable_params': {
-                'window_size': [1.0, 100.0]
-            }
-        },
-        {
-            'name': 'rolling_std',
-            'function': differentiable_rolling_std,
-            'learnable_params': {
-                'window_size': [1.0, 100.0]
-            },
-            'fixed_params': {
-                'eps': 1e-8
-            }
-        },
-        {
-            'name': 'ewma',
-            'function': differentiable_ewma,
-            'learnable_params': {
-                'alpha': [0.1, 0.9]
-            }
-        }
-    ]
+    eps = 1e-8
+    gamma = gamma.view(1, 1, -1)
+
+    for i in range(ranges.shape[0]):
+        # this range (window size) for all input dims
+        range_size = ranges[i, :]
+        # make the kernel for this range
+        normalised_dist = torch.abs((center - positions) / range_size)
+        weights = _gauss_kernel(normalised_dist, gamma) * mask
+        weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
+    
+        # NOTE can probably take some of these out the loop
+        m[:, i, :]    = rolling_avg(x, max_window, range_size, gamma)  # get the mean of this range NOTE you could optimise this and std by expanding it here
+        Y[:, i, :, :] = (x - m[:, i, :].unsqueeze(1)) * weights  # deviation from mean
+        y[:, i, :, :] = torch.cumsum(Y[:, i, :, :], dim=1)  # cumulative sum of deviations
+        R[:, i, :]    = torch.max(Y[:, i, :, :], dim=1)[0] - torch.min(y[:, i, :, :], dim=1)[0]  # max range
+        s[:, i, :]    = rolling_std(x, max_window, range_size, gamma)  # standard deviation of range
+        RS[:, i, :]   = R[:, i, :] / (s[:, i, :] + eps)
+    
+    log_size = torch.log(ranges)  # shape (batch_size, n_ranges, input_dim)
+    log_RS = torch.log(RS.clamp(min=eps))  # shape (batch_size, n_ranges, input_dim)
+
+    B, N, D = log_RS.shape
+    log_RS_flat = log_RS.permute(0, 2, 1).reshape(B * D, N)  # (batch_size * input_dim, n_ranges)
+    ones = torch.ones((B * D, N), device=x.device)
+    log_size_flat = log_size.t().unsqueeze(0).expand(B, D, N).reshape(B * D, N)
+    X = torch.stack([ones, log_size_flat], dim=-1)  # (B * D, N, 2)
+
+    solution = torch.linalg.lstsq(X, log_RS_flat)
+    beta = solution.solution  # (B * D, 2), [c, H] per problem
+    estimated_H = beta[:, 1].reshape(B, D)  # (batch_size, input_dim)
+
+    return estimated_H.unsqueeze(1)
