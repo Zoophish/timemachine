@@ -18,8 +18,6 @@ class StatefulLSTM(nn.Module):
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers=layers, batch_first=True)
         self.dropout = nn.Dropout(p=dropout)
 
-        # self.fc = nn.Linear(hidden_size, output_size)
-
         self.posterior_layers = nn.ModuleList()
         for i in range(int(output_depth)):
             in_features = int(hidden_size * output_size_decay**i)
@@ -31,10 +29,6 @@ class StatefulLSTM(nn.Module):
             ))
         self.last_fc = nn.Linear(int(hidden_size * output_size_decay**output_depth), output_size)
 
-        # self.fc1 = nn.Linear(hidden_size, int(hidden_size*bottleneck))
-        # self.fc2 = nn.Linear(int(hidden_size*bottleneck), output_size)
-        # self.relu = nn.ReLU()
-    
     def forward(
             self,
             x : torch.Tensor | nn.utils.rnn.PackedSequence,
@@ -51,20 +45,13 @@ class StatefulLSTM(nn.Module):
             out, _ = nn.utils.rnn.pad_packed_sequence(packed_out, batch_first=True)
         else:
             out, (h, c) = self.lstm(x, (h, c) if h is not None else None)
-        
-        # out = self.dropout(out)
-        # out = self.fc(h[-1])
-
-        # out = self.dropout(out[:, -1, :])
-        # out = self.relu(self.fc1(out))
-        # out = self.fc2(out)
 
         out = h[-1]
         for layer in self.posterior_layers:
             out = layer(out)
         out = self.last_fc(out)
 
-        # unsqueeze simply create a time dimension so we can compare to train data easily
+        # unsqueeze creates a singleton time dimension NOTE this could be removed
         if state_connected:
             return out.unsqueeze(1), (h, c)
         else:
