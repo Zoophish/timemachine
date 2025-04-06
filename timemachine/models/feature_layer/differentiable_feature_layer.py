@@ -239,21 +239,20 @@ class DifferentiableFeatureLayer(nn.Module):
                 full_series=full_series
             )
 
-            # batch_windows contains max_window size, but we need to 'slide' a view over this for each element in the sequence
-            # Notice that we slide the start of the window here with t, but because each batch item may have a different window size,
-            # the end of the window needs to be handled in the feature function
+            # we need to 'slide' the center point over the lookback for each element in the sequence
             for t in range(window_size):  # apply the feature func for each position in the input sequence
-                # the centre is counterintuitively the front of the window (formally because it's symmetric)
-                centre = self.max_lookback_size + t
-                result[:, t, :] = feature_func(lookback_batch[:, t:, :], max_window=self.max_lookback_size, **params)
+                # the center is counterintuitively the front of the window (technically because it's symmetric)
+                # or rather just the current position in the input sequence x
+                center = self.max_lookback_size + t
+                result[:, t, :] = feature_func(lookback_batch, center=center, **params)
 
         elif feature_type == 'recurrent':
+            # NOTE I haven't decided how to properly implement recurrent feature functions yet, so ignore
             batch_windows = self._get_batch_lookback(
                 indices=indices,
                 full_series=full_series
             )
 
-            # feature doesn't use a window - use the input tensor x
             # (confusion note) instead of sliding the back of the window, we slide the front
             context = torch.zeros((batch_size, 1, input_dim), device=device)
             for t in range(0, window_size): # this is very slow, should consider changing it
