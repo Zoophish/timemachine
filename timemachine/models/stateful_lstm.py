@@ -12,10 +12,18 @@ class StatefulLSTM(nn.Module):
             layers,
             output_depth:int=4,
             output_size_decay=0.5,
-            dropout=0):
+            dropout=0,
+            bidirectional:bool=False
+        ):
         
         super(StatefulLSTM, self).__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=layers, batch_first=True)
+        self.lstm = nn.LSTM(
+            input_size,
+            hidden_size,
+            num_layers=layers,
+            batch_first=True,
+            bidirectional=bidirectional
+        )
         self.dropout = nn.Dropout(p=dropout)
 
         self.posterior_layers = nn.ModuleList()
