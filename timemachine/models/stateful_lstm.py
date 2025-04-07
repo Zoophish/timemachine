@@ -21,7 +21,8 @@ class StatefulLSTM(nn.Module):
             hidden_size,
             num_layers=layers,
             batch_first=True,
-            bidirectional=bidirectional
+            bidirectional=bidirectional,
+            dropout=dropout
         )
         self.dropout = nn.Dropout(p=dropout)
 
