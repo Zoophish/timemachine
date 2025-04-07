@@ -10,13 +10,12 @@ class StatefulLSTM(nn.Module):
             hidden_size,
             output_size,
             layers,
-            output_depth:int=4,
-            output_size_decay=0.5,
             dropout=0,
             bidirectional:bool=False
         ):
         
         super(StatefulLSTM, self).__init__()
+
         self.lstm = nn.LSTM(
             input_size,
             hidden_size,
@@ -26,16 +25,8 @@ class StatefulLSTM(nn.Module):
         )
         self.dropout = nn.Dropout(p=dropout)
 
-        self.posterior_layers = nn.ModuleList()
-        for i in range(int(output_depth)):
-            in_features = int(hidden_size * output_size_decay**i)
-            out_features = int(hidden_size * output_size_decay**(i+1))
-            self.posterior_layers.append(nn.Sequential(
-                nn.Linear(in_features, out_features),
-                nn.LayerNorm(out_features),
-                nn.ReLU()
-            ))
-        self.last_fc = nn.Linear(int(hidden_size * output_size_decay**output_depth), output_size)
+        hidden_size = 2 * hidden_size if bidirectional else hidden_size
+        self.last_fc = nn.Linear(hidden_size, output_size)
 
     def forward(
             self,
@@ -43,20 +34,25 @@ class StatefulLSTM(nn.Module):
             h = None,
             c = None,
             state_connected=True,
-            packed_input=True):
+            packed_input=True
+        ):
         if state_connected and (h is None or c is None):
             batch_size = x.batch_sizes[0]  # Get the batch size from packed sequence
-            h = torch.zeros(self.lstm.num_layers, batch_size, self.lstm.hidden_size).to(x.data.device)
-            c = torch.zeros(self.lstm.num_layers, batch_size, self.lstm.hidden_size).to(x.data.device)
+            num_directions = 2 if self.lstm.bidirectional else 1
+            h = torch.zeros(self.lstm.num_layers * num_directions, batch_size, self.lstm.hidden_size).to(x.data.device)
+            c = torch.zeros(self.lstm.num_layers * num_directions, batch_size, self.lstm.hidden_size).to(x.data.device)
+
         if packed_input:
             packed_out, (h, c) = self.lstm(x, (h, c) if h is not None else None)
             out, _ = nn.utils.rnn.pad_packed_sequence(packed_out, batch_first=True)
         else:
             out, (h, c) = self.lstm(x, (h, c) if h is not None else None)
 
-        out = h[-1]
-        for layer in self.posterior_layers:
-            out = layer(out)
+        if self.lstm.bidirectional:
+            out = torch.cat([h[-2], h[-1]], dim=1)
+        else:
+            out = h[-1]
+
         out = self.last_fc(out)
 
         # unsqueeze creates a singleton time dimension NOTE this could be removed
