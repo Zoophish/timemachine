@@ -9,13 +9,41 @@ def log_relative(series, base_series, eps : float = 1e-4):
     """
     return np.log(series / (base_series + eps))
 
-def log_returns(series):
+def log_returns(series, eps : float = 1e-4):
     """
     Log returns of timeseries, i.e. ln(x[t]/x[t-1]).
     """
     out = np.zeros(shape=(len(series)))
-    out[1:] = np.log(series[1:] / series[:-1])
+    returns = series[1:] / (series[:-1] + eps)
+    out[1:] = np.log(abs(returns) + eps)
     return out
+
+def rolling_future_horizon_abs_change(series, horizon):
+    """
+    Returns mean absolute change of the future horizon for each position in series.
+    """
+    assert horizon > 1, "Horizon must be greater than 1."
+    out = np.zeros_like(series)
+    for i in range(len(series)):
+        horizon_end = min(len(series), i + horizon)
+        horizon_mean = np.mean(series[i+1:horizon_end])
+        out[i] = horizon_mean - out[i]
+    return out
+
+
+def rolling_future_horizon_abs_change_volatility_adjusted(series, horizon):
+    """
+    Returns mean absolute change divided by the standard deviation of the future horizon for each position in series.
+    """
+    assert horizon > 1, "Horizon must be greater than 1."
+    out = np.zeros_like(series)
+    for i in range(len(series)):
+        horizon_end = min(len(series), i + horizon + 1)
+        horizon_mean = np.mean(series[i+1:horizon_end])
+        horizon_std = np.std(series[i+1:horizon_end])
+        out[i] = (horizon_mean - series[i]) / (1 + horizon_std)
+    return out
+
 
 def rolling_mean(series, window):
     """
@@ -30,7 +58,7 @@ def rolling_mean(series, window):
     """
     return pd.Series(series).rolling(window=window, min_periods=1).mean().ffill().bfill().to_numpy()
 
-def rolling_std(series, window):
+def rolling_std(series, window, shift=0):
     """
     Calculate the rolling standard deviation of a time series.
 
@@ -41,7 +69,8 @@ def rolling_std(series, window):
     Returns:
         np.ndarray: Rolling standard deviation of the input series.
     """
-    return pd.Series(series).rolling(window=window, min_periods=1).std().ffill().bfill().to_numpy()
+    pdseries = pd.Series(series).shift(shift)
+    return pdseries.rolling(window=window, min_periods=1).std().ffill().bfill().to_numpy()
 
 def rolling_rsi(series, window):
     """

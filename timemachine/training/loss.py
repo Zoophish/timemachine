@@ -94,12 +94,11 @@ class MAPELoss(nn.Module):
     """
     Mean absolute percentage error.
     """
-    def __init__(self, epsilon=1e-8):
+    def __init__(self):
         super().__init__()
-        self.epsilon = epsilon
         
     def forward(self, predictions, targets):
-        percentage_errors = torch.abs((predictions - targets) * divide_no_nan(torch.ones_like(targets),  torch.abs(targets)))
+        percentage_errors = torch.abs((targets - predictions) * divide_no_nan(torch.ones_like(targets),  torch.abs(targets)))
         
         mape = 100.0 * torch.mean(percentage_errors)
         
@@ -109,10 +108,52 @@ class MAELoss(nn.Module):
     """
     Mean absolute error loss.
     """
-    def __init__(self, epsilon=1e-8):
+    def __init__(self):
         super().__init__()
-        self.epsilon = epsilon
         
     def forward(self, predictions, targets):
         mae = torch.mean(torch.abs(predictions - targets))
         return mae
+    
+
+class QuantileLoss(nn.Module):
+    """
+    Quantile loss for multiple quantiles across time, computed efficiently using tensor operations.
+    Input shape: predictions [batch_size, time, num_quantiles], targets [batch_size, time]
+    """
+    def __init__(self, quantiles, epsilon=1e-8):
+        super().__init__()
+        assert all(0 < q < 1 for q in quantiles), "Quantiles must be between 0 and 1"
+        self.quantiles = torch.tensor(quantiles, dtype=torch.float32)  # e.g., [0.1, 0.5, 0.9]
+        self.epsilon = epsilon
+        
+    def forward(self, predictions, targets):
+        # predictions shape: [batch_size, time, num_quantiles]
+        # targets shape: [batch_size, time] or [batch_size, time, 1]
+        assert predictions.dim() == 3, "Predictions must have shape [batch_size, time, num_quantiles]"
+        assert predictions.shape[2] == len(self.quantiles), "Number of quantiles in predictions must match quantiles provided"
+        
+        # Ensure targets has an extra dimension for broadcasting
+        if targets.dim() == 2:
+            targets = targets.unsqueeze(-1)  # [batch_size, time, 1]
+        
+        assert targets.shape[:2] == predictions.shape[:2], "Batch and time dimensions must match between predictions and targets"
+        
+        # Move quantiles to the device of predictions and add dimensions for broadcasting
+        quantiles = self.quantiles.to(predictions.device).view(1, 1, -1)  # [1, 1, num_quantiles]
+        
+        # Compute errors: [batch_size, time, num_quantiles]
+        errors = targets - predictions
+        
+        # Compute quantile loss using broadcasting
+        losses = torch.where(
+            errors >= 0,
+            quantiles * errors,          # Underprediction: q * error
+            (1 - quantiles) * -errors    # Overprediction: (1 - q) * (-error)
+        )
+        
+        # Mean over all dimensions (batch, time, quantiles)
+        total_loss = torch.mean(losses)
+        # Alternative: torch.mean(losses, dim=[0, 1]).sum() to sum per-quantile losses over batch and time
+        
+        return total_loss

@@ -27,7 +27,10 @@ class HourglassMLP(nn.Module):
 
         hidden_size = int(input_size * hidden_size_fac)
 
-        self.input_layer = nn.Linear(input_size, hidden_size)
+        self.input_layer = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.ReLU(),
+        )
 
         self.hidden_layers = nn.ModuleList()
         for i in range(int(hidden_layers)):
@@ -39,10 +42,8 @@ class HourglassMLP(nn.Module):
                 )
             )
 
-        self.output_layer = nn.Sequential(
-            nn.Linear(hidden_size, output_size),
-            nn.ReLU()
-        )
+        self.output_layer = nn.Linear(hidden_size, output_size)
+
 
     def forward(self, x : torch.Tensor):
         x = self.input_layer(x)
