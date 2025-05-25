@@ -69,8 +69,7 @@ def rolling_std(series, window, shift=0):
     Returns:
         np.ndarray: Rolling standard deviation of the input series.
     """
-    pdseries = pd.Series(series).shift(shift)
-    return pdseries.rolling(window=window, min_periods=1).std().ffill().bfill().to_numpy()
+    return pd.Series(series).rolling(window=window, min_periods=1).std().shift(shift).ffill().bfill().to_numpy()
 
 def rolling_rsi(series, window):
     """

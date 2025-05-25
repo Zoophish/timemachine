@@ -19,6 +19,7 @@ class DFLSTM(nn.Module):
             feature_config : list,
             device : torch.device,
             dropout : float = 0,
+            bidirectional : bool = False,
             pool : str = 'max'
         ):
         
@@ -37,11 +38,10 @@ class DFLSTM(nn.Module):
             hidden_size=hidden_size,
             layers=lstm_layers,
             dropout=dropout,
+            bidirectional=bidirectional,
             pool=pool
         )
-        
-        self.last_fc = nn.Linear(hidden_size, output_size)
-    
+            
     def forward(
             self,
             x : torch.Tensor,
@@ -60,7 +60,6 @@ class DFLSTM(nn.Module):
         """
         
         x = self.df_layer(x, full_buffer, indices)
-
         x = self.lstm(x)
         return x
 
@@ -97,7 +96,8 @@ class DFDNN(nn.Module):
             hidden_size_fac=hidden_size_fac,
             hidden_layers=hidden_layers,
             output_size=output_size,
-            dropout=dropout
+            dropout=dropout,
+            format='null'
         )
     
     def forward(

@@ -74,37 +74,3 @@ class StatefulLSTM(nn.Module):
             return out.unsqueeze(1).transpose(1, 2), (h, c)
         else:
             return out.unsqueeze(1).transpose(1, 2)
-
-
-class ForecastDecoder(nn.Module):
-    def __init__(self, hidden_size, forecast_horizon):
-        super(ForecastDecoder, self).__init__()
-        
-        self.query_layer = nn.Linear(hidden_size, hidden_size)
-        self.output_layer = nn.Linear(hidden_size, 1)
-        self.forecast_horizon = forecast_horizon
-        
-    def forward(self, encoder_outputs):
-        """
-        encoder_outputs: (batch_size, seq_len, hidden_size)
-        """
-        batch_size, seq_len, hidden_size = encoder_outputs.size()
-        
-        # Simple: mean pool the encoder outputs to start the forecast
-        context = encoder_outputs.mean(dim=1)  # (batch_size, hidden_size)
-        
-        forecasts = []
-        for step in range(self.forecast_horizon):
-            # Query transform
-            query = self.query_layer(context)  # (batch_size, hidden_size)
-            query = torch.tanh(query)
-            
-            # Predict next step
-            pred = self.output_layer(query)  # (batch_size, 1)
-            forecasts.append(pred)
-            
-            # Update context if you want (e.g., feed back pred) - optional
-            context = context  # Here keeping context fixed; can update if you want
-        
-        forecasts = torch.cat(forecasts, dim=1)  # (batch_size, forecast_horizon)
-        return forecasts.unsqueeze(1)  # (batch_size, 1, forecast_horizon)

@@ -109,8 +109,8 @@ class CNNLSTM(nn.Module):
             x : torch.Tensor | nn.utils.rnn.PackedSequence,
             h = None,
             c = None,
-            state_connected=True,
-            packed_input=True):
+            state_connected=False,
+            packed_input=False):
         
         if packed_input:
             x, lengths = nn.utils.rnn.pad_packed_sequence(x, batch_first=True)
@@ -158,6 +158,6 @@ class CNNLSTM(nn.Module):
 
         # unsqueeze creates time dimension so we can compare to train data easily
         if state_connected:
-            return out.unsqueeze(1), (h, c)
+            return out.unsqueeze(1).transpose(1, 2), (h, c)
         else:
-            return out.unsqueeze(1), (None, None)
+            return out.unsqueeze(1).transpose(1, 2)
