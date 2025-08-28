@@ -3,8 +3,8 @@ import numpy as np
 import torch
 from datetime import datetime, timedelta
 from typing import List, Set, Tuple
-from itertools import islice
-
+import sys
+import random
 
 
 def make_window_target_pairs(
@@ -136,16 +136,12 @@ def transform_batch(batch : torch.Tensor, transform):
     return torch.tensor(batch)
 
 
-def batched(iterable, n):
-    if n < 1:
-        raise ValueError('n must be >= 1')
-    it = iter(iterable)
-    while batch := list(islice(it, n)):
-        yield batch
-
-
-class SlidingWindowDataset(torch.utils.data.Dataset):
+class DTSlidingWindowDataset(torch.utils.data.Dataset):
     """
+    Dataframe requirements
+        - Regular timestamp intervals
+        - Sorted by timestamp
+        - Unique timestamps
     """
 
     def __init__(
@@ -159,7 +155,7 @@ class SlidingWindowDataset(torch.utils.data.Dataset):
         horizon_steps : int,
         lookback_cols : Set[str],
         target_cols : Set[str]
-    ):
+        ):
         self.df = df
         self.ts_col = timestamp_col
         self.lookback = lookback
@@ -177,21 +173,52 @@ class SlidingWindowDataset(torch.utils.data.Dataset):
         min_dt = self.df[self.ts_col].min()
         max_dt = self.df[self.ts_col].max()
 
-        center_dts = pl.datetime_range(start=min_dt, end=max_dt, interval=self.stride, eager=True)
+        print("Generating centers...")
         self.centers = []
 
+        # unfortunately, we must test every single centre to make sure it produces valid contiguous windows
+        # this is a slightly cumbersome but necessary process
+        timestamps = self.df[self.ts_col].to_numpy()
+
+        stride = int(self.stride / timedelta(minutes=1))
+        i = self.lookback_steps
+        while i < len(timestamps) - self.horizon_steps:
+            lookback_delta = timestamps[i] - timestamps[i - self.lookback_steps]
+            horizon_delta = timestamps[i + self.horizon_steps] - timestamps[i]
+            # if the horizon skipped ahead, advance the center (i) to the next valid chunk
+            # this is to avoid skipping things with the stride
+            if horizon_delta > self.horizon:  
+                while (timestamps[i] - timestamps[i - self.lookback_steps]) != self.lookback:
+                    i += 1
+            # center has contiguous windows on either side
+            if lookback_delta == self.lookback and horizon_delta == self.horizon:
+                self.centers.append(self.df.row(i, named=True)[self.ts_col])
+
+            i += stride
+
+            # print progress
+            last_j = -1
+            j = 100 * i // len(timestamps)
+            if j != last_j:
+                sys.stdout.write(f'\r[{"█" * (j//2)}{"░" * (50-j//2)}] {j}%')
+                sys.stdout.flush()
+        print(f"Finished. ({len(self.centers)}) centers.")
+
         # thread this
-        for dt in center_dts:
-            has_lookback = self.df.filter(
-                (pl.col(self.ts_col) >= (dt - self.lookback)) &
-                (pl.col(self.ts_col) < dt)
-            ).height == self.lookback_steps
-            has_lookahead = self.df.filter(
-                (pl.col(self.ts_col) < (dt + self.horizon)) &
-                (pl.col(self.ts_col) >= dt)
-            ).height == self.horizon_steps
-            if has_lookback and has_lookahead:
-                self.centers.append(dt)
+        # for n, dt in enumerate(center_dts):
+        #     has_lookback = self.df.filter(
+        #         (pl.col(self.ts_col) >= (dt - self.lookback)) &
+        #         (pl.col(self.ts_col) < dt)
+        #     ).height == self.lookback_steps
+        #     has_lookahead = self.df.filter(
+        #         (pl.col(self.ts_col) >= dt) &
+        #         (pl.col(self.ts_col) < (dt + self.horizon))
+        #     ).height == self.horizon_steps
+        #     if has_lookback and has_lookahead:
+        #         self.centers.append(dt)
+        #     i = n // len(center_dts)
+        #     sys.stdout.write(f'\r[{"█" * (i//2)}{"░" * (50-i//2)}] {i}%')
+        #     sys.stdout.flush()
 
 
     def __len__(self):
@@ -222,3 +249,53 @@ class SlidingWindowDataset(torch.utils.data.Dataset):
         )
 
         return lookback_window, target_window
+
+
+class SlidingWindowDataset(torch.utils.data.Dataset):
+    """
+    Non-datetime indexed sliding window dataset.
+    """
+    def __init__(self, time_series, lookback_steps, forecast_steps, sample_mode='random', **kwargs):
+        self.lookback_steps = lookback_steps
+        self.forecast_steps = forecast_steps
+        self.sample_mode = sample_mode
+        self.n_samples = kwargs.get('n_samples')
+        self.time_series = torch.tensor(time_series, dtype=torch.float32)
+        self.indices = self._create_indices()
+        self.remainder = 0
+
+    def _create_indices(self):
+        indices = []
+        match self.sample_mode:
+            case 'segments':
+                i = self.lookback_steps
+                while i <= len(self.time_series) - self.forecast_steps:
+                    indices.append(i)
+                    i += self.lookback_steps + self.forecast_steps
+                self.remainder = len(self.time_series) - 1 - i
+            case 'complete-output-coverage':
+                i = self.lookback_steps
+                while i <= len(self.time_series) - self.forecast_steps:
+                    indices.append(i)
+                    i += self.forecast_steps
+                self.remainder = len(self.time_series) - 1 - i
+            case 'random':
+                indices = [random.randint(
+                    self.lookback_steps,
+                    len(self.time_series) - self.forecast_steps
+                ) for _ in range(self.n_samples)]
+                self.remainder = self.forecast_steps
+        return indices
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        forecast_start_idx = self.indices[idx]
+        lookback_start_idx = forecast_start_idx - self.lookback_steps
+        x = self.time_series[lookback_start_idx:forecast_start_idx]
+        y = self.time_series[forecast_start_idx:forecast_start_idx + self.forecast_steps]
+        if x.dim() == y.dim() == 1:
+            x = x.unsqueeze(1)
+            y = y.unsqueeze(1)
+        return x, y
