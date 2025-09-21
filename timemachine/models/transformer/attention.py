@@ -50,17 +50,20 @@ class RotaryPositionalEncoding(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim : int, n_head : int, head_dim : int, device='cpu', use_rope : bool = True):
+    def __init__(self, dim : int, n_head : int, device='cpu', use_rope : bool = True):
         super().__init__()
+
+        if dim % n_head != 0:
+            raise ValueError("dim must be divisible by n_head")
         self.n_head = n_head
-        self.head_dim = head_dim
+        self.head_dim = dim // n_head
         self.device = device
         
         # query, key, value, output matrices
-        self.W_q = nn.Linear(dim, n_head * head_dim, bias=False, device=device)
-        self.W_k = nn.Linear(dim, n_head * head_dim, bias=False, device=device)
-        self.W_v = nn.Linear(dim, n_head * head_dim, bias=False, device=device)
-        self.W_o = nn.Linear(dim, n_head * head_dim, bias=False, device=device)
+        self.W_q = nn.Linear(dim, n_head * self.head_dim, bias=False, device=device)
+        self.W_k = nn.Linear(dim, n_head * self.head_dim, bias=False, device=device)
+        self.W_v = nn.Linear(dim, n_head * self.head_dim, bias=False, device=device)
+        self.W_o = nn.Linear(dim, n_head * self.head_dim, bias=False, device=device)
         self.rope = RotaryPositionalEncoding(dim, device) if use_rope else None
 
     def forward(self, x : torch.Tensor, mask=None):
@@ -70,14 +73,18 @@ class Attention(nn.Module):
         q = self.W_q(x)
         k = self.W_k(x)
         v = self.W_v(x)
+        # separate each head
+        q = q.view(batch_size, seq_len, self.n_head, self.head_dim)
+        k = k.view(batch_size, seq_len, self.n_head, self.head_dim)
+        v = v.view(batch_size, seq_len, self.n_head, self.head_dim)
         # apply RoPE
         if self.rope:
             q = self.rope(q)
             k = self.rope(k)
-        # separate each head and transpose for correct batching
-        q = q.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
-        k = k.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
-        v = v.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        # transpose for correct batching
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
         # dot product attention
         scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim**0.5)
         if mask:
@@ -95,7 +102,6 @@ class EncoderLayer(nn.Module):
             self,
             d_model : int,
             n_head : int,
-            head_dim : int,
             d_ff : int,
             dropout : float,
             device = 'cpu',
@@ -105,7 +111,6 @@ class EncoderLayer(nn.Module):
         self.attention = Attention(
             d_model,
             n_head,
-            head_dim,
             device=device, 
             use_rope=use_rope
         )
@@ -131,7 +136,6 @@ class DecoderTransformer(nn.Module):
             out_dim : int,
             d_model : int,
             n_head : int,
-            head_dim : int,
             d_ff : int,
             dropout : float,
             n_layers : int,
@@ -141,7 +145,7 @@ class DecoderTransformer(nn.Module):
         super().__init__()
         self.input_projection = nn.Linear(in_dim, out_dim, device=device)
         self.decoder_blocks = nn.ModuleList([
-            EncoderLayer(d_model, n_head, head_dim, d_ff, dropout, device, use_rope)
+            EncoderLayer(d_model, n_head, d_ff, dropout, device, use_rope)
             for _ in range(n_layers)
         ])
         self.fc = nn.Linear(d_model, out_dim, device=device)
