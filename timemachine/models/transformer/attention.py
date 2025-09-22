@@ -9,15 +9,14 @@ class RotaryPositionalEncoding(nn.Module):
     """
     def __init__(self, dim, device='cpu', precompute_seq_len=512, base=10000.0):
         super().__init__()
-        self.d_modimdel = dim
+        self.dim = dim
         self.base = base
         self.device = device
 
         # precompute inverse of theta vector Θ = {θi = 10000−2(i−1)/d, i ∈ [1, 2, ..., d/2]}
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2) / dim)).to(device)
         self.register_buffer("inv_freq", inv_freq)
-
-        self._set_cos_sin_cache(seq_len=precompute_seq_len, device=device, dtype=torch.float32)
+        self._set_cos_sin_cache(seq_len=precompute_seq_len, device=device)
 
     def _set_cos_sin_cache(self, seq_len, device):
         t = torch.arange(seq_len, device=device)
@@ -35,17 +34,18 @@ class RotaryPositionalEncoding(nn.Module):
         self.max_seq_len_cached = seq_len
 
     def forward(self, x : torch.Tensor):
-        seq_len = x.shape[1]
+        batch_size, n_head, seq_len, dim = x.shape
         if seq_len > self.max_seq_len_cached:
             self._set_cos_sin_cache(seq_len, device=x.device, dtype=x.dtype)
-        cos = self.cos_cached[:seq_len, ...]
-        sin = self.sin_cached[:seq_len, ...]
-        cos = cos.unsqueeze(0).unsqueeze(2)
-        sin = sin.unsqueeze(0).unsqueeze(2)
+        # add singleton dimensions for batch and attn heads
+        cos = self.cos_cached[None, None, :seq_len, ...]
+        sin = self.sin_cached[None, None, :seq_len, ...]
 
-        x_half_1 = x[..., 0::2]
-        x_half_2 = x[..., 1::2]
-        x_rotated = torch.cat((-x_half_2, x_half_1), dim=-1)
+        # computationally efficient form of rotary matrix multiplication
+        x_half_1 = x[..., 0::2]  # get every even indexed element
+        x_half_2 = x[..., 1::2]  # ... and every odd indexed
+        # x_rotated = torch.cat((-x_half_2, x_half_1), dim=-1)
+        x_rotated = torch.stack([-x_half_2, x_half_1], dim=-1).flatten(start_dim=-2)
         return x * cos + x_rotated * sin
 
 
@@ -60,11 +60,11 @@ class Attention(nn.Module):
         self.device = device
         
         # query, key, value, output matrices
-        self.W_q = nn.Linear(dim, n_head * self.head_dim, bias=False, device=device)
-        self.W_k = nn.Linear(dim, n_head * self.head_dim, bias=False, device=device)
-        self.W_v = nn.Linear(dim, n_head * self.head_dim, bias=False, device=device)
-        self.W_o = nn.Linear(dim, n_head * self.head_dim, bias=False, device=device)
-        self.rope = RotaryPositionalEncoding(dim, device) if use_rope else None
+        self.W_q = nn.Linear(dim, dim, bias=False, device=device)
+        self.W_k = nn.Linear(dim, dim, bias=False, device=device)
+        self.W_v = nn.Linear(dim, dim, bias=False, device=device)
+        self.W_o = nn.Linear(dim, dim, bias=False, device=device)
+        self.rope = RotaryPositionalEncoding(self.head_dim, device) if use_rope else None
 
     def forward(self, x : torch.Tensor, mask=None):
         batch_size, seq_len, n_feat = x.shape
@@ -73,22 +73,18 @@ class Attention(nn.Module):
         q = self.W_q(x)
         k = self.W_k(x)
         v = self.W_v(x)
-        # separate each head
-        q = q.view(batch_size, seq_len, self.n_head, self.head_dim)
-        k = k.view(batch_size, seq_len, self.n_head, self.head_dim)
-        v = v.view(batch_size, seq_len, self.n_head, self.head_dim)
+        # separate each head and transpose for correct batching
+        q = q.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
         # apply RoPE
         if self.rope:
             q = self.rope(q)
             k = self.rope(k)
-        # transpose for correct batching
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
         # dot product attention
         scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim**0.5)
-        if mask:
-            scores = scores.masked_fill(mask == 0, float('-inf'))
+        if mask is not None:
+            scores = scores.masked_fill(mask, float('-inf'))
         attention_weights = F.softmax(scores, dim=-1)
         output = torch.matmul(attention_weights, v)
 
@@ -117,15 +113,19 @@ class EncoderLayer(nn.Module):
         self.fc1 = nn.Linear(d_model, d_ff, device=device)
         self.fc2 = nn.Linear(d_ff, d_model, device=device)
         self.activation = nn.GELU()
-        self.layer_norm1 = nn.LayerNorm(d_model)
-        self.layer_norm2 = nn.LayerNorm(d_model)
+        self.layer_norm1 = nn.LayerNorm(d_model, device=device)
+        self.layer_norm2 = nn.LayerNorm(d_model, device=device)
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x : torch.Tensor, mask=None):
-        attn = self.attention(x, mask)
-        x = self.layer_norm1(x + self.dropout(attn))
-        ff_out = self.fc2(self.activation(self.fc1(x)))
-        x = self.layer_norm2(x + self.dropout(ff_out))
+        # apply pre-layer normalisation
+        normed_x = self.layer_norm1(x)
+        attn = self.attention(normed_x, mask)
+        x = x + self.dropout(attn)
+
+        normed_x = self.layer_norm2(x)
+        ff_out = self.fc2(self.activation(self.fc1(normed_x)))
+        x = x + self.dropout(ff_out)
         return x
 
 
@@ -143,7 +143,9 @@ class DecoderTransformer(nn.Module):
             use_rope = True
         ):
         super().__init__()
-        self.input_projection = nn.Linear(in_dim, out_dim, device=device)
+        self.device = device
+        self.d_model = d_model
+        self.input_projection = nn.Linear(in_dim, d_model, device=device)
         self.decoder_blocks = nn.ModuleList([
             EncoderLayer(d_model, n_head, d_ff, dropout, device, use_rope)
             for _ in range(n_layers)
@@ -154,15 +156,14 @@ class DecoderTransformer(nn.Module):
         # the causal mask will mean that at any output position, the attention heads
         # can only attend to inputs preceding it. This is a training trick which is
         # more efficient than showing the model input/target pairs
-        mask = (torch.triu(torch.ones(sz, sz, device=self.device)) == 1).transpose(0, 1)
-        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+        mask = torch.triu(torch.ones(sz, sz, device=self.device), diagonal=1).bool()
         return mask
     
     def forward(self, x : torch.Tensor):
         seq_len = x.size(1)
         causal_mask = self._generate_causal_mask(seq_len)
 
-        x = self.input_projection(x) * self.d_model**0.5
+        x = self.input_projection(x)
 
         decoder_out = x
         for decoder_block in self.decoder_blocks:
