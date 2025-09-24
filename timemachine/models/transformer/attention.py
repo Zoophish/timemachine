@@ -84,7 +84,8 @@ class Attention(nn.Module):
         # dot product attention
         scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim**0.5)
         if mask is not None:
-            scores = scores.masked_fill(mask, float('-inf'))
+            mask = mask.unsqueeze(1)  # extend the mask across attn head dim
+            scores = scores.masked_fill(mask, float('-inf'))  # note, true -> -inf
         attention_weights = F.softmax(scores, dim=-1)
         output = torch.matmul(attention_weights, v)
 
@@ -159,15 +160,20 @@ class DecoderTransformer(nn.Module):
         mask = torch.triu(torch.ones(sz, sz, device=self.device), diagonal=1).bool()
         return mask
     
-    def forward(self, x : torch.Tensor):
+    def forward(self, x : torch.Tensor, mask=None):
         seq_len = x.size(1)
-        causal_mask = self._generate_causal_mask(seq_len)
+        # the causal mask extends across the batch dim
+        total_mask = self._generate_causal_mask(seq_len).unsqueeze(0)
+
+        if mask is not None:
+            # mask extends across key dim
+            total_mask = total_mask | mask.unsqueeze(1)
 
         x = self.input_projection(x)
 
         decoder_out = x
         for decoder_block in self.decoder_blocks:
-            decoder_out = decoder_block(decoder_out, causal_mask)
+            decoder_out = decoder_block(decoder_out, total_mask)
         
         out = self.fc(decoder_out)
         return out

@@ -6,6 +6,7 @@ from typing import List, Set, Tuple
 import sys
 import random
 
+_device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def make_window_target_pairs(
         df : pl.DataFrame,
@@ -154,7 +155,8 @@ class DTSlidingWindowDataset(torch.utils.data.Dataset):
         lookback_steps : int,
         horizon_steps : int,
         lookback_cols : Set[str],
-        target_cols : Set[str]
+        target_cols : Set[str],
+        device = 'cpu'
         ):
         self.df = df
         self.ts_col = timestamp_col
@@ -165,6 +167,7 @@ class DTSlidingWindowDataset(torch.utils.data.Dataset):
         self.horizon_steps = horizon_steps
         self.lookback_cols = lookback_cols
         self.target_cols = target_cols
+        self.device = 'cpu'
 
         self._commit()
 
@@ -241,11 +244,13 @@ class DTSlidingWindowDataset(torch.utils.data.Dataset):
 
         lookback_window = torch.tensor(
             lookback_df[self.lookback_cols].to_numpy(),
-            dtype=torch.float32
+            dtype=torch.float32,
+            device=self.device
         )
         target_window = torch.tensor(
             lookahead_df[self.target_cols].to_numpy(),
-            dtype=torch.float32
+            dtype=torch.float32,
+            device=self.device
         )
 
         return lookback_window, target_window
@@ -254,13 +259,14 @@ class DTSlidingWindowDataset(torch.utils.data.Dataset):
 class SlidingWindowDataset(torch.utils.data.Dataset):
     """
     Non-datetime indexed sliding window dataset.
+    Data is kept on host until loaded.
     """
     def __init__(self, time_series, lookback_steps, forecast_steps, sample_mode='random', **kwargs):
         self.lookback_steps = lookback_steps
         self.forecast_steps = forecast_steps
         self.sample_mode = sample_mode
         self.n_samples = kwargs.get('n_samples')
-        self.time_series = torch.tensor(time_series, dtype=torch.float32)
+        self.time_series = time_series
         self.indices = self._create_indices()
         self.remainder = 0
 
@@ -273,7 +279,7 @@ class SlidingWindowDataset(torch.utils.data.Dataset):
                     indices.append(i)
                     i += self.lookback_steps + self.forecast_steps
                 self.remainder = len(self.time_series) - 1 - i
-            case 'complete-output-coverage':
+            case 'continuous-output-coverage':
                 i = self.lookback_steps
                 while i <= len(self.time_series) - self.forecast_steps:
                     indices.append(i)
@@ -293,9 +299,55 @@ class SlidingWindowDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         forecast_start_idx = self.indices[idx]
         lookback_start_idx = forecast_start_idx - self.lookback_steps
-        x = self.time_series[lookback_start_idx:forecast_start_idx]
-        y = self.time_series[forecast_start_idx:forecast_start_idx + self.forecast_steps]
+        x = torch.tensor(
+            self.time_series[lookback_start_idx:forecast_start_idx],
+            dtype=torch.float32
+        )
+        y = torch.tensor(
+            self.time_series[forecast_start_idx:forecast_start_idx + self.forecast_steps],
+            dtype=torch.float32
+        )
         if x.dim() == y.dim() == 1:
             x = x.unsqueeze(1)
             y = y.unsqueeze(1)
         return x, y
+
+
+class RandomSegmentDataset(torch.utils.data.Dataset):
+    """
+    Non-datetime indexed sliding window dataset.
+    Data is kept on host until loaded.
+    """
+    def __init__(self, time_series, min_steps, max_steps, n_samples):
+        self.min_steps = min_steps
+        self.max_steps = max_steps
+        self.n_samples = n_samples
+        self.time_series = time_series
+
+    def __len__(self):
+        return self.n_samples
+
+    def __getitem__(self, idx):
+        n_steps = random.randint(self.min_steps, self.max_steps)
+        start_idx = random.randint(0, len(self.time_series) - n_steps)
+        end_idx = start_idx + n_steps
+        x = torch.tensor(
+            self.time_series[start_idx:end_idx],
+            dtype=torch.float32
+        )
+        if x.dim() == 1:
+            x = x.unsqueeze(-1)
+        return x
+
+
+def collate_pad(batch_items):
+    _, feat_dim = batch_items[0].shape
+    batch_size = len(batch_items)
+    lengths = [len(seq) for seq in batch_items]
+    padded_batch = torch.zeros(batch_size, max(lengths), feat_dim)
+    # padded_batch = torch.nn.utils.rnn.pad_sequence(batch_items, batch_first=True)
+    mask = torch.ones(padded_batch.shape[0], padded_batch.shape[1])
+    for i, length in enumerate(lengths):
+        padded_batch[i, :length, ...] = batch_items[i]
+        mask[i, :length] = 0.0
+    return padded_batch, mask.bool()
